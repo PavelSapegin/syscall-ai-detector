@@ -1,31 +1,70 @@
-﻿using Microsoft.Diagnostics.Tracing;
-using Microsoft.Diagnostics.Tracing.Parsers;
-using Microsoft.Diagnostics.Tracing.Session;
-using System;
+﻿using System;
+using System.Collections.Concurrent;
 using System.IO;
 using System.Text.Json;
 using System.Text.Json.Serialization;
+using System.Text.RegularExpressions;
+using Microsoft.Diagnostics.Tracing;
+using Microsoft.Diagnostics.Tracing.Parsers;
+using Microsoft.Diagnostics.Tracing.Session;
 
 namespace SyscallMonitor
 {
 
     public class TraceEventRecord
     {
-        public string Timestamp {get; set;} = "";
-        public string EventType {get; set;} = "";
-        public int ProcessID {get; set;}
-        public int ParentProcessID {get; set;}
-        public string ImageFileName {get; set;} = "";
-        public int? ExitCode {get; set;}
+        public string Timestamp { get; set; } = "";
+        public string EventType { get; set; } = "";
+        public int ProcessID { get; set; }
+        public int ParentProcessID { get; set; }
+        public string ImageFileName { get; set; } = "";
+        public int? ExitCode { get; set; }
+        public string? KeyName { get; set; }
+        public string? ValueName { get; set; }
     }
     class Program
     {
         private const string SessionName = "SyscallMonitorSession";
         private const string OutputPath = "traces.jsonl";
 
+        private static readonly ConcurrentDictionary<ulong, string> _keyNameCache = new();
         private static readonly object _fileLock = new();
         private static StreamWriter? _writer;
 
+
+        private static readonly Regex _hkeyMachineRegex =
+            new(@"^\\?REGISTRY\\MACHINE\\", RegexOptions.IgnoreCase | RegexOptions.Compiled);
+
+        private static readonly Regex _hkeyUserSidRegex =
+            new(@"^\\?REGISTRY\\USER\\(S-1-5-[0-9-]+)\\", RegexOptions.IgnoreCase | RegexOptions.Compiled);
+
+        private static readonly Regex _hkeyUserDefaultRegex =
+            new(@"^\\?REGISTRY\\USER\\\.DEFAULT\\", RegexOptions.IgnoreCase | RegexOptions.Compiled);
+
+        private static readonly Regex _hkeyWcSiloRegex =
+            new(@"^\\?REGISTRY\\WC\\", RegexOptions.IgnoreCase | RegexOptions.Compiled);
+
+
+        private static string NormalizeRegistryPath(string? rawPath)
+        {
+            if (string.IsNullOrWhiteSpace(rawPath))
+                return "";
+
+            if (_hkeyMachineRegex.IsMatch(rawPath))
+                return "HKLM\\" + _hkeyMachineRegex.Replace(rawPath, "");
+
+            var userMatch = _hkeyUserSidRegex.Match(rawPath);
+            if (userMatch.Success)
+                return $"HKU\\{userMatch.Groups[1].Value}\\" + _hkeyUserSidRegex.Replace(rawPath, "");
+
+            if (_hkeyUserDefaultRegex.IsMatch(rawPath))
+                return "HKU\\.DEFAULT\\" + _hkeyUserDefaultRegex.Replace(rawPath, "");
+
+            if (_hkeyWcSiloRegex.IsMatch(rawPath))
+                return "HKWC\\" + _hkeyWcSiloRegex.Replace(rawPath, "");
+
+            return rawPath;
+        }
         private static readonly JsonSerializerOptions _jsonOptions = new()
         {
             WriteIndented = false,
@@ -39,7 +78,7 @@ namespace SyscallMonitor
                 return;
             }
 
-            _writer = new StreamWriter(OutputPath, append: true) {AutoFlush = true};
+            _writer = new StreamWriter(OutputPath, append: true) { AutoFlush = true };
 
             using var session = new TraceEventSession(SessionName);
 
@@ -47,15 +86,15 @@ namespace SyscallMonitor
             {
                 e.Cancel = true;
                 session.Stop();
-                _writer?.Flush();
-                _writer?.Dispose();
-                Console.WriteLine("Сессия оставновлена.");
             };
 
-            session.EnableKernelProvider(KernelTraceEventParser.Keywords.Process);
+            session.EnableKernelProvider(
+                KernelTraceEventParser.Keywords.Process |
+                KernelTraceEventParser.Keywords.Registry);
 
             Console.WriteLine($"Мониторинг запущен. Запись в {OutputPath}. Нажмите Ctrl + C для остановки.");
 
+            // Process
             session.Source.Kernel.ProcessStart += data =>
             {
                 var record = new TraceEventRecord
@@ -95,8 +134,58 @@ namespace SyscallMonitor
                 );
             };
 
+            // Registry
+            session.Source.Kernel.RegistryCreate += data =>
+            {
+                var record = new TraceEventRecord
+                {
+                    Timestamp = data.TimeStamp.ToString("yyyy-MM-dd HH:mm:ss.fff"),
+                    EventType = "RegistryCreate",
+                    ProcessID = data.ProcessID,
+                    KeyName = NormalizeRegistryPath(data.KeyName)
+                };
+                WriteRecord(record);
+                Console.WriteLine($"[{record.Timestamp}] REG-CREATE  PID={record.ProcessID,-6} Key={record.KeyName}");
+            };
+
+            session.Source.Kernel.RegistryKCBCreate += data =>
+            {
+                _keyNameCache[(ulong)data.KeyHandle] = NormalizeRegistryPath(data.KeyName);
+            };
+
+            session.Source.Kernel.RegistryKCBRundownEnd += data =>
+            {
+                _keyNameCache[(ulong)data.KeyHandle] = NormalizeRegistryPath(data.KeyName);
+            };
+
+            session.Source.Kernel.RegistrySetValue += data =>
+            {
+                string resolvedKey = _keyNameCache.TryGetValue((ulong)data.KeyHandle, out var cached)
+                    ? cached
+                    : data.KeyName;
+
+                var record = new TraceEventRecord
+                {
+                    Timestamp = data.TimeStamp.ToString("yyyy-MM-dd HH:mm:ss.fff"),
+                    EventType = "RegistrySetValue",
+                    ProcessID = data.ProcessID,
+                    KeyName = NormalizeRegistryPath(resolvedKey),
+                    ValueName = data.ValueName
+                };
+                WriteRecord(record);
+                Console.WriteLine($"[{record.Timestamp}] REG-SETVAL  PID={record.ProcessID,-6} Key={record.KeyName} Value={record.ValueName}");
+            };
 
             session.Source.Process();
+            lock (_fileLock)
+            {
+                _writer?.Flush();
+                _writer?.Dispose();
+                _writer = null;
+            }
+
+            Console.WriteLine("Работа программы корректно завершена.");
+
         }
 
         private static void WriteRecord(TraceEventRecord record)
@@ -104,9 +193,19 @@ namespace SyscallMonitor
             string json = JsonSerializer.Serialize(record, _jsonOptions);
             lock (_fileLock)
             {
-                _writer?.WriteLine(json);
+                if (_writer != null && _writer.BaseStream != null && _writer.BaseStream.CanWrite)
+                {
+                    try
+                    {
+                        _writer.WriteLine(json);
+                    }
+                    catch (ObjectDisposedException)
+                    {
+
+                    }
+                }
             }
         }
-        
-    }    
+
+    }
 }
