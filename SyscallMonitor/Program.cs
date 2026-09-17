@@ -1,4 +1,4 @@
-﻿using System;
+using System;
 using System.Collections.Concurrent;
 using System.IO;
 using System.Text.Json;
@@ -21,6 +21,9 @@ namespace SyscallMonitor
         public int? ExitCode { get; set; }
         public string? KeyName { get; set; }
         public string? ValueName { get; set; }
+        public string? FileName { get; set; }
+        public long? IoSize { get; set; }
+        public long? FileOffset { get; set; }
     }
     class Program
     {
@@ -90,7 +93,9 @@ namespace SyscallMonitor
 
             session.EnableKernelProvider(
                 KernelTraceEventParser.Keywords.Process |
-                KernelTraceEventParser.Keywords.Registry);
+                KernelTraceEventParser.Keywords.Registry |
+                KernelTraceEventParser.Keywords.FileIO |
+                KernelTraceEventParser.Keywords.FileIOInit);
 
             Console.WriteLine($"Мониторинг запущен. Запись в {OutputPath}. Нажмите Ctrl + C для остановки.");
 
@@ -107,11 +112,6 @@ namespace SyscallMonitor
                 };
 
                 WriteRecord(record);
-
-                Console.WriteLine(
-                    $"[{record.Timestamp}] START  PID={record.ProcessID,-6} " +
-                    $"PPID={record.ParentProcessID,-6} Image={record.ImageFileName}"
-                );
             };
 
             session.Source.Kernel.ProcessStop += data =>
@@ -127,11 +127,6 @@ namespace SyscallMonitor
                 };
 
                 WriteRecord(record);
-
-                Console.WriteLine(
-                    $"[{record.Timestamp}] STOP   PID={record.ProcessID,-6} " +
-                    $"Image={record.ImageFileName} ExitCode={record.ExitCode}"
-                );
             };
 
             // Registry
@@ -145,7 +140,6 @@ namespace SyscallMonitor
                     KeyName = NormalizeRegistryPath(data.KeyName)
                 };
                 WriteRecord(record);
-                Console.WriteLine($"[{record.Timestamp}] REG-CREATE  PID={record.ProcessID,-6} Key={record.KeyName}");
             };
 
             session.Source.Kernel.RegistryKCBCreate += data =>
@@ -173,7 +167,33 @@ namespace SyscallMonitor
                     ValueName = data.ValueName
                 };
                 WriteRecord(record);
-                Console.WriteLine($"[{record.Timestamp}] REG-SETVAL  PID={record.ProcessID,-6} Key={record.KeyName} Value={record.ValueName}");
+            };
+
+            // File I/O
+            session.Source.Kernel.FileIOCreate += data =>
+            {
+                var record = new TraceEventRecord
+                {
+                    Timestamp = data.TimeStamp.ToString("yyyy-MM-dd HH:mm:ss.fff"),
+                    EventType = "FileIOCreate",
+                    ProcessID = data.ProcessID,
+                    FileName = data.FileName
+                };
+                WriteRecord(record);
+            };
+
+            session.Source.Kernel.FileIOWrite += data =>
+            {
+                var record = new TraceEventRecord
+                {
+                    Timestamp = data.TimeStamp.ToString("yyyy-MM-dd HH:mm:ss.fff"),
+                    EventType = "FileIOWrite",
+                    ProcessID = data.ProcessID,
+                    FileName = data.FileName,
+                    IoSize = data.IoSize,
+                    FileOffset = data.Offset
+                };
+                WriteRecord(record);
             };
 
             session.Source.Process();
