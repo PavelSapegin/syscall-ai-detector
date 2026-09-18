@@ -1,6 +1,7 @@
 using System;
 using System.Collections.Concurrent;
 using System.IO;
+using System.Net;
 using System.Text.Json;
 using System.Text.Json.Serialization;
 using System.Text.RegularExpressions;
@@ -24,6 +25,12 @@ namespace SyscallMonitor
         public string? FileName { get; set; }
         public long? IoSize { get; set; }
         public long? FileOffset { get; set; }
+        public string? Protocol { get; set; }
+        public string? RemoteAddress { get; set; }
+        public int? LocalPort { get; set; }
+        public int? RemotePort { get; set; }
+        public int? NetworkSize { get; set; }
+        public ulong? ConnectionId { get; set; }
     }
     class Program
     {
@@ -95,7 +102,8 @@ namespace SyscallMonitor
                 KernelTraceEventParser.Keywords.Process |
                 KernelTraceEventParser.Keywords.Registry |
                 KernelTraceEventParser.Keywords.FileIO |
-                KernelTraceEventParser.Keywords.FileIOInit);
+                KernelTraceEventParser.Keywords.FileIOInit |
+                KernelTraceEventParser.Keywords.NetworkTCPIP);
 
             Console.WriteLine($"Мониторинг запущен. Запись в {OutputPath}. Нажмите Ctrl + C для остановки.");
 
@@ -196,6 +204,37 @@ namespace SyscallMonitor
                 WriteRecord(record);
             };
 
+            // Network (TCP)
+            session.Source.Kernel.TcpIpSend += data =>
+                WriteTcpRecord("TcpIpSend", data.daddr, data.sport, data.dport, data.size, data.connid, data);
+            session.Source.Kernel.TcpIpRecv += data =>
+                WriteTcpRecord("TcpIpRecv", data.daddr, data.sport, data.dport, data.size, data.connid, data);
+            session.Source.Kernel.TcpIpConnect += data =>
+                WriteTcpRecord("TcpIpConnect", data.daddr, data.sport, data.dport, data.size, data.connid, data);
+            session.Source.Kernel.TcpIpDisconnect += data =>
+                WriteTcpRecord("TcpIpDisconnect", data.daddr, data.sport, data.dport, data.size, data.connid, data);
+            session.Source.Kernel.TcpIpReconnect += data =>
+                WriteTcpRecord("TcpIpReconnect", data.daddr, data.sport, data.dport, data.size, data.connid, data);
+            session.Source.Kernel.TcpIpRetransmit += data =>
+                WriteTcpRecord("TcpIpRetransmit", data.daddr, data.sport, data.dport, data.size, data.connid, data);
+            session.Source.Kernel.TcpIpAccept += data =>
+                WriteTcpRecord("TcpIpAccept", data.daddr, data.sport, data.dport, data.size, data.connid, data);
+
+            session.Source.Kernel.TcpIpSendIPV6 += data =>
+                WriteTcpRecord("TcpIpSend", data.daddr, data.sport, data.dport, data.size, data.connid, data);
+            session.Source.Kernel.TcpIpRecvIPV6 += data =>
+                WriteTcpRecord("TcpIpRecv", data.daddr, data.sport, data.dport, data.size, data.connid, data);
+            session.Source.Kernel.TcpIpConnectIPV6 += data =>
+                WriteTcpRecord("TcpIpConnect", data.daddr, data.sport, data.dport, data.size, data.connid, data);
+            session.Source.Kernel.TcpIpDisconnectIPV6 += data =>
+                WriteTcpRecord("TcpIpDisconnect", data.daddr, data.sport, data.dport, data.size, data.connid, data);
+            session.Source.Kernel.TcpIpReconnectIPV6 += data =>
+                WriteTcpRecord("TcpIpReconnect", data.daddr, data.sport, data.dport, data.size, data.connid, data);
+            session.Source.Kernel.TcpIpRetransmitIPV6 += data =>
+                WriteTcpRecord("TcpIpRetransmit", data.daddr, data.sport, data.dport, data.size, data.connid, data);
+            session.Source.Kernel.TcpIpAcceptIPV6 += data =>
+                WriteTcpRecord("TcpIpAccept", data.daddr, data.sport, data.dport, data.size, data.connid, data);
+
             session.Source.Process();
             lock (_fileLock)
             {
@@ -206,6 +245,31 @@ namespace SyscallMonitor
 
             Console.WriteLine("Работа программы корректно завершена.");
 
+        }
+
+        private static void WriteTcpRecord(
+            string eventType,
+            IPAddress? remoteAddress,
+            int localPort,
+            int remotePort,
+            int size,
+            ulong connectionId,
+            TraceEvent data)
+        {
+            var record = new TraceEventRecord
+            {
+                Timestamp = data.TimeStamp.ToString("yyyy-MM-dd HH:mm:ss.fff"),
+                EventType = eventType,
+                ProcessID = data.ProcessID,
+                Protocol = "TCP",
+                RemoteAddress = remoteAddress?.ToString(),
+                LocalPort = localPort,
+                RemotePort = remotePort,
+                NetworkSize = size,
+                ConnectionId = connectionId
+            };
+
+            WriteRecord(record);
         }
 
         private static void WriteRecord(TraceEventRecord record)
