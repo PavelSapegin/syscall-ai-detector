@@ -2,6 +2,7 @@ using System;
 using System.Collections.Concurrent;
 using System.IO;
 using System.Net;
+using System.Diagnostics;
 using System.Text.Json;
 using System.Text.Json.Serialization;
 using System.Text.RegularExpressions;
@@ -41,6 +42,11 @@ namespace SyscallMonitor
         private static readonly object _fileLock = new();
         private static StreamWriter? _writer;
 
+        // Filtering: track a process and its children
+        private static bool _filterEnabled = false;
+        private static int? _filterPid = null;
+        private static string? _filterProcessNameLower = null;
+        private static readonly ConcurrentDictionary<int, bool> _trackedPids = new();
 
         private static readonly Regex _hkeyMachineRegex =
             new(@"^\\?REGISTRY\\MACHINE\\", RegexOptions.IgnoreCase | RegexOptions.Compiled);
@@ -88,6 +94,39 @@ namespace SyscallMonitor
                 return;
             }
 
+            // parse simple args: --pid=<num> or --process-name=<name>
+            foreach (var a in args)
+            {
+                if (a.StartsWith("--pid=", StringComparison.OrdinalIgnoreCase) &&
+                    int.TryParse(a.Substring(6), out var pid))
+                {
+                    _filterEnabled = true;
+                    _filterPid = pid;
+                    _trackedPids.TryAdd(pid, true);
+                }
+                else if (a.StartsWith("--process-name=", StringComparison.OrdinalIgnoreCase))
+                {
+                    _filterEnabled = true;
+                    _filterProcessNameLower = a.Substring("--process-name=".Length).ToLowerInvariant();
+                    try
+                    {
+                        foreach (var p in Process.GetProcesses())
+                        {
+                            try
+                            {
+                                if (string.Equals(p.ProcessName, _filterProcessNameLower, StringComparison.OrdinalIgnoreCase) ||
+                                    string.Equals((p.ProcessName + ".exe"), _filterProcessNameLower, StringComparison.OrdinalIgnoreCase))
+                                {
+                                    _trackedPids.TryAdd(p.Id, true);
+                                }
+                            }
+                            catch { }
+                        }
+                    }
+                    catch { }
+                }
+            }
+
             _writer = new StreamWriter(OutputPath, append: true) { AutoFlush = true };
 
             using var session = new TraceEventSession(SessionName);
@@ -110,6 +149,25 @@ namespace SyscallMonitor
             // Process
             session.Source.Kernel.ProcessStart += data =>
             {
+
+                if (_filterEnabled)
+                {
+                    if (data.ParentID != 0 && _trackedPids.ContainsKey(data.ParentID))
+                    {
+                        _trackedPids.TryAdd(data.ProcessID, true);
+                    }
+
+                    if (!string.IsNullOrEmpty(_filterProcessNameLower) &&
+                        !string.IsNullOrEmpty(data.ImageFileName) &&
+                        data.ImageFileName.ToLowerInvariant().Contains(_filterProcessNameLower))
+                    {
+                        _trackedPids.TryAdd(data.ProcessID, true);
+                    }
+
+                    if (_filterPid.HasValue && data.ProcessID == _filterPid.Value)
+                        _trackedPids.TryAdd(data.ProcessID, true);
+                }
+
                 var record = new TraceEventRecord
                 {
                     Timestamp = data.TimeStamp.ToString("yyyy-MM-dd HH:mm:ss.fff"),
@@ -119,7 +177,9 @@ namespace SyscallMonitor
                     ImageFileName = data.ImageFileName
                 };
 
-                WriteRecord(record);
+
+                if (!_filterEnabled || _trackedPids.ContainsKey(record.ProcessID))
+                    WriteRecord(record);
             };
 
             session.Source.Kernel.ProcessStop += data =>
@@ -134,7 +194,9 @@ namespace SyscallMonitor
                     ExitCode = data.ExitStatus
                 };
 
-                WriteRecord(record);
+
+                if (!_filterEnabled || _trackedPids.ContainsKey(record.ProcessID))
+                    WriteRecord(record);
             };
 
             // Registry
@@ -274,6 +336,10 @@ namespace SyscallMonitor
 
         private static void WriteRecord(TraceEventRecord record)
         {
+
+            if (_filterEnabled && !_trackedPids.ContainsKey(record.ProcessID))
+                return;
+
             string json = JsonSerializer.Serialize(record, _jsonOptions);
             lock (_fileLock)
             {
