@@ -309,8 +309,9 @@ def process_all(traces_root: Path, output_dir: Path) -> None:
                         )
 
                     row: dict[str, Any] = {
-                        "sample_id": (f"{Path(s['trace_file']).stem}"
-                                      f"_{s['root_pid']}_{h}"),
+                        "sample_id": (
+                            f"{Path(s['trace_file']).stem}_{s['root_pid']}_{h}"
+                        ),
                         "trace_file": s["trace_file"],
                         "root_pid": s["root_pid"],
                         "horizon": h,
