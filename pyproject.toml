@@ -1,0 +1,30 @@
+[tool.ruff]
+target-version = "py312"
+line-length = 88
+src = ["src"]
+exclude = [
+    ".git",
+    ".venv",
+    ".mypy_cache",
+    ".ruff_cache",
+    "build",
+    "out",
+    "data",
+    "NtdllSyscallMonitor",
+    "SyscallMonitor",
+    "W7SyscallMonitor",
+]
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "UP", "B", "C4", "SIM", "RUF", "FURB", "S", "PLW"]
+allowed-confusables = ["а", "с", "е", "о", "р", "х", "у", "В", "С", "Е", "Н", "О", "Р", "Т", "Х", "М", "К", "А", "і"]
+
+[tool.ruff.lint.per-file-ignores]
+"*.ipynb" = ["E501", "RUF001"]
+
+[tool.mypy]
+python_version = "3.12"
+ignore_missing_imports = true
+check_untyped_defs = true
+warn_unused_ignores = true
+exclude = '(^|/)(data|build|out|\.venv|\.mypy_cache|\.ruff_cache)/'
