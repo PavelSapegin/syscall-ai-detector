@@ -220,9 +220,7 @@ def process_all(traces_root: Path, output_dir: Path) -> None:
                     if s["ambiguous_root"]:
                         report["ambiguous_roots"].append(s["trace_file"])
 
-                # --- [ИСПРАВЛЕНИЕ 2]: Оставляем только события целевого дерева процессо
                 if s["is_malware"] and s.get("ambiguous_root"):
-                    # Для малвари, если монитор уже изолировал процесс, берем всё
                     proc_events = s["events"]
                 else:
                     family_pids = get_process_family_pids(s["events"], s["root_pid"])
@@ -237,7 +235,6 @@ def process_all(traces_root: Path, output_dir: Path) -> None:
                     if feats.get("n_events", 0) == 0:
                         continue
 
-                    # --- [ИСПРАВЛЕНИЕ 3]: Сеть считается СТРОГО внутри горизонта h 
                     start_ts = s["t_start"].timestamp()
                     window_end = start_ts + float(h)
 
