@@ -414,7 +414,7 @@ def train_and_evaluate(
     tn_opt, fp_opt, fn_opt, tp_opt = cm_opt.ravel()
 
     print("\n" + "=" * 65)
-    print(f"📊 EVALUATION RESULTS (Horizon = {horizon}s, {n_splits}-fold CV)")
+    print(f"EVALUATION RESULTS (Horizon = {horizon}s, {n_splits}-fold CV)")
     print("=" * 65)
     print(f"ROC-AUC:                {metrics_05['roc_auc']:.4f}")
     print(f"PR-AUC:                 {metrics_05['pr_auc']:.4f}")
@@ -425,7 +425,7 @@ def train_and_evaluate(
     print(f"  Recall:               {metrics_05['recall']:.4f}")
     print(f"  Confusion Matrix:     TN={tn_05}, FP={fp_05}, FN={fn_05}, TP={tp_05}")
     print("-" * 65)
-    print(f"🎯 Optimal Threshold (by F1): {optimal_thresh:.4f}")
+    print(f"Optimal Threshold (by F1): {optimal_thresh:.4f}")
     print(f"  F1-Score:             {metrics_opt['f1']:.4f}")
     print(f"  Precision:            {metrics_opt['precision']:.4f}")
     print(f"  Recall:               {metrics_opt['recall']:.4f}")
