@@ -6,6 +6,7 @@ import json
 import time
 from pathlib import Path
 
+import pytest
 from src.orchestrator.config import OrchestratorConfig
 from src.orchestrator.main import Orchestrator
 from src.orchestrator.registry import ProcessStatus
@@ -32,7 +33,11 @@ def _create_orchestrator(
     return orch
 
 
-def test_e2e_benign_lifecycle(tmp_path: Path, sample_benign_events: list[dict]) -> None:
+def test_e2e_benign_lifecycle(
+    tmp_path: Path,
+    sample_benign_events: list[dict],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     """End-to-end test: Benign process is permitted to continue running."""
     traces_path = tmp_path / "traces.jsonl"
     audit_path = tmp_path / "audit.jsonl"
@@ -44,6 +49,7 @@ def test_e2e_benign_lifecycle(tmp_path: Path, sample_benign_events: list[dict]) 
 
     # Use high threshold so notepad is evaluated benign
     orch = _create_orchestrator(tmp_path, horizon=0.5, threshold=0.99)
+    monkeypatch.setattr(orch.inference_engine, "predict", lambda _: (0.1, False))
     orch.ingestion_worker.start()
     orch.scheduler.start()
 
@@ -66,7 +72,9 @@ def test_e2e_benign_lifecycle(tmp_path: Path, sample_benign_events: list[dict]) 
 
 
 def test_e2e_malware_detection_and_blocking(
-    tmp_path: Path, sample_malware_events: list[dict]
+    tmp_path: Path,
+    sample_malware_events: list[dict],
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """End-to-end test: Malware sequence is detected and blocked."""
     traces_path = tmp_path / "traces.jsonl"
@@ -78,6 +86,7 @@ def test_e2e_malware_detection_and_blocking(
     )
 
     orch = _create_orchestrator(tmp_path, horizon=0.5, threshold=0.5)
+    monkeypatch.setattr(orch.inference_engine, "predict", lambda _: (0.9, True))
     orch.ingestion_worker.start()
     orch.scheduler.start()
 
@@ -99,7 +108,10 @@ def test_e2e_malware_detection_and_blocking(
     assert proc.status in (ProcessStatus.KILLED, ProcessStatus.MALICIOUS)
 
 
-def test_e2e_mock_monitor_integration(tmp_path: Path) -> None:
+def test_e2e_mock_monitor_integration(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     """End-to-end test: MockMonitor generates events that are evaluated."""
     traces_path = tmp_path / "traces.jsonl"
     audit_path = tmp_path / "audit.jsonl"
@@ -117,6 +129,7 @@ def test_e2e_mock_monitor_integration(tmp_path: Path) -> None:
         threshold=0.5,
     )
     orch = Orchestrator(config)
+    monkeypatch.setattr(orch.inference_engine, "predict", lambda _: (0.9, True))
     orch.start()
 
     time.sleep(2.5)

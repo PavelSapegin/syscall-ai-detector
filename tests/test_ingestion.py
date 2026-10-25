@@ -104,15 +104,20 @@ def test_file_rotation(tmp_path: Path) -> None:
     traces_path = tmp_path / "traces.jsonl"
     registry = ProcessRegistry()
 
-    # Create initial file with one event
-    initial_event = {
-        "Timestamp": "2026-10-22 10:00:00.000",
-        "EventType": "ProcessStart",
-        "ProcessID": 7001,
-        "ParentProcessID": 1,
-        "ImageFileName": "proc1.exe",
-    }
-    traces_path.write_text(json.dumps(initial_event) + "\n", encoding="utf-8")
+    # Create initial file with multiple events so file offset is large
+    events = [
+        {
+            "Timestamp": "2026-10-22 10:00:00.000",
+            "EventType": "ProcessStart",
+            "ProcessID": 7001 + i,
+            "ParentProcessID": 1,
+            "ImageFileName": f"proc{i}.exe",
+        }
+        for i in range(5)
+    ]
+    traces_path.write_text(
+        "".join(json.dumps(e) + "\n" for e in events), encoding="utf-8"
+    )
 
     worker = EventIngestionWorker(
         traces_path=traces_path,
@@ -125,18 +130,20 @@ def test_file_rotation(tmp_path: Path) -> None:
 
     assert registry.get(7001) is not None
 
-    # Simulate rotation: unlink and recreate file (inode changes, standard log rotation)
+    # Simulate rotation/truncation: rewrite file with smaller size and new event.
+    # On Windows, deleting (unlink) an open file raises WinError 32, but in-place
+    # truncation is supported and triggers curr_stat.st_size < trace_f.tell()
     new_event = {
         "Timestamp": "2026-10-22 10:00:05.000",
         "EventType": "ProcessStart",
-        "ProcessID": 7002,
+        "ProcessID": 8888,
         "ParentProcessID": 1,
-        "ImageFileName": "proc2.exe",
+        "ImageFileName": "rotated.exe",
     }
-    traces_path.unlink()
-    traces_path.write_text(json.dumps(new_event) + "\n", encoding="utf-8")
+    with open(traces_path, "w", encoding="utf-8") as f:
+        f.write(json.dumps(new_event) + "\n")
 
     time.sleep(0.3)
     worker.stop()
 
-    assert registry.get(7002) is not None
+    assert registry.get(8888) is not None
