@@ -21,10 +21,21 @@ allowed-confusables = ["а", "с", "е", "о", "р", "х", "у", "В", "С", "Е
 
 [tool.ruff.lint.per-file-ignores]
 "*.ipynb" = ["E501", "RUF001"]
+"tests/*" = ["S101", "S603"]
 
 [tool.mypy]
 python_version = "3.12"
 ignore_missing_imports = true
 check_untyped_defs = true
 warn_unused_ignores = true
+mypy_path = "."
+explicit_package_bases = true
 exclude = '(^|/)(data|build|out|\.venv|\.mypy_cache|\.ruff_cache)/'
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+pythonpath = ["."]
+addopts = "-v --tb=short"
+filterwarnings = [
+    "ignore::ResourceWarning",
+]
