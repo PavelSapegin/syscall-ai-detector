@@ -89,10 +89,8 @@ class HorizonScheduler:
 
             # 2. Extract features and construct DMatrix
             try:
-                dmatrix, raw_features = (
-                    self.features_adapter.build_feature_matrix(
-                        all_events, start_time, self.horizon
-                    )
+                dmatrix, raw_features = self.features_adapter.build_feature_matrix(
+                    all_events, start_time, self.horizon
                 )
             except Exception as e:
                 logger.error(

@@ -119,9 +119,7 @@ class ProcessRegistry:
             if len(proc.events) < self._max_events_per_proc:
                 proc.events.append(event)
 
-    def hunt_process_tree(
-        self, root_pid: int
-    ) -> tuple[set[int], list[dict[str, Any]]]:
+    def hunt_process_tree(self, root_pid: int) -> tuple[set[int], list[dict[str, Any]]]:
         """Hunt a process and all its recursive descendants.
 
         Returns:
