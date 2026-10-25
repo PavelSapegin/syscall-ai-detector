@@ -10,3 +10,6 @@ seaborn
 ruff
 mypy
 pytest
+pytest-cov
+psutil
+
