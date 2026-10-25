@@ -13,12 +13,24 @@ def test_is_running_as_admin_unix(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(sys, "platform", "linux")
 
     # Simulate root (uid 0)
-    monkeypatch.setattr("os.geteuid", lambda: 0)
+    monkeypatch.setattr("os.geteuid", lambda: 0, raising=False)
     assert is_running_as_admin() is True
 
     # Simulate non-root (uid 1000)
-    monkeypatch.setattr("os.geteuid", lambda: 1000)
+    monkeypatch.setattr("os.geteuid", lambda: 1000, raising=False)
     assert is_running_as_admin() is False
+
+
+def test_is_running_as_admin_windows(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Test elevation check on Windows platform using ctypes mock."""
+    monkeypatch.setattr(sys, "platform", "win32")
+
+    mock_shell32 = type("MockShell32", (), {"IsUserAnAdmin": lambda: 1})
+    mock_ctypes = type(
+        "MockCtypes", (), {"windll": type("MockWindll", (), {"shell32": mock_shell32})}
+    )
+    monkeypatch.setitem(sys.modules, "ctypes", mock_ctypes)
+    assert is_running_as_admin() is True
 
 
 def test_verify_admin_privileges_elevated(monkeypatch: pytest.MonkeyPatch) -> None:
