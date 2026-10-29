@@ -73,9 +73,9 @@ class ProcessRegistry:
             proc.last_event_time = timestamp
             proc.status = ProcessStatus.ACTIVE
 
-            # Link with parent process if known
-            if ppid > 0 and ppid in self._processes:
-                self._processes[ppid].children.add(pid)
+            # Link with parent process (handles out-of-order child arrival)
+            if ppid > 0:
+                self.get_or_create(ppid).children.add(pid)
 
             logger.debug(
                 "Registered ProcessStart: PID=%d, PPID=%d, Image=%s",

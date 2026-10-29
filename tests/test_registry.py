@@ -103,7 +103,7 @@ def test_out_of_order_events(registry: ProcessRegistry, now: datetime) -> None:
     parent = registry.register_process_start(
         pid=3000, ppid=1, image_file_name="parent.exe", timestamp=now
     )
-    assert 3001 in (parent.children or {3001})
+    assert 3001 in parent.children
 
 
 def test_hunt_tree_linear_and_branching(
