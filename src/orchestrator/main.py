@@ -61,9 +61,17 @@ class Orchestrator:
         self.features_adapter = FeaturesAdapter(self.config.reference_features_path)
 
         # 2. ML Model & Inference
+        model_target: Path | dict[float, Path] = (
+            self.config.model_paths
+            or self.config.model_path
+            or Path("out/models/xgboost_horizon_5s.json")
+        )
+        metrics_target: Path | dict[float, Path] | None = (
+            self.config.metrics_paths or self.config.metrics_path
+        )
         self.inference_engine = InferenceEngine(
-            model_path=self.config.model_path,
-            metrics_path=self.config.metrics_path,
+            model_path=model_target,
+            metrics_path=metrics_target,
             custom_threshold=self.config.threshold,
         )
 
@@ -102,18 +110,24 @@ class Orchestrator:
             inference_engine=self.inference_engine,
             response_engine=self.response_engine,
             audit_logger=self.audit_logger,
-            horizon=self.config.horizon,
+            horizons=self.config.horizons,
             interval_s=self.config.timer_interval_s,
         )
 
     def start(self) -> None:
         """Start all background subsystems."""
+        horizons_str = ", ".join(f"{h:.1f}s" for h in self.config.horizons)
+        thresh_info = (
+            f"Custom: {self.config.threshold:.4f}"
+            if self.config.threshold is not None
+            else "Calibrated per-horizon"
+        )
         logger.info("==================================================")
         logger.info("   Starting Syscall AI Detector Orchestrator      ")
         logger.info(
-            "   Horizon: %.1fs | Threshold: %.4f",
-            self.config.horizon,
-            self.inference_engine.threshold,
+            "   Cascade Horizons: [%s] | Thresholds: %s",
+            horizons_str,
+            thresh_info,
         )
         logger.info("==================================================")
 

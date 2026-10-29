@@ -3,27 +3,34 @@
 from __future__ import annotations
 
 import argparse
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 
 
 @dataclass
 class OrchestratorConfig:
-    # Horizon window in seconds (e.g. 5.0, 10.0, 30.0)
-    horizon: float = 5.0
+    # Cascade evaluation horizons in seconds (e.g. [5.0, 10.0, 30.0])
+    horizons: list[float] = field(default_factory=list)
 
-    # Path to trained XGBoost model JSON
-    model_path: Path = Path("out/models/xgboost_horizon_5s.json")
+    # Backward compatibility for single horizon
+    horizon: float | None = None
 
-    # Path to metrics JSON (to extract optimal_threshold_f1)
-    metrics_path: Path | None = Path("out/models/metrics_horizon_5s.json")
+    # Paths to trained XGBoost models per horizon
+    model_paths: dict[float, Path] = field(default_factory=dict)
+
+    # Paths to metrics JSON per horizon
+    metrics_paths: dict[float, Path] = field(default_factory=dict)
+
+    # Backward compatibility single paths
+    model_path: Path | None = None
+    metrics_path: Path | None = None
 
     # Path to reference features JSON
     reference_features_path: Path = Path(
         "out/models/reference_features_horizon_5s.json"
     )
 
-    # Threshold for malware probability. If None, loaded from metrics_path
+    # Threshold for malware probability. If None, loaded from metrics_path per horizon
     threshold: float | None = None
 
     # Path to traces.jsonl produced by SyscallMonitor
@@ -52,6 +59,41 @@ class OrchestratorConfig:
     # Maximum age of terminated processes to keep in memory (seconds)
     process_ttl_s: float = 300.0
 
+    def __post_init__(self) -> None:
+        """Normalize horizons and path dictionaries for single or cascade execution."""
+        if self.horizon is not None and not self.horizons:
+            # Single horizon mode (backward compatibility)
+            self.horizons = [float(self.horizon)]
+        elif not self.horizons:
+            # Default cascade mode
+            self.horizons = [5.0, 10.0, 30.0]
+            self.horizon = 5.0
+        else:
+            self.horizon = self.horizons[0]
+
+        for h in self.horizons:
+            h_int = int(h) if h.is_integer() else h
+            if h not in self.model_paths:
+                if self.model_path:
+                    self.model_paths[h] = self.model_path
+                else:
+                    self.model_paths[h] = Path(
+                        f"out/models/xgboost_horizon_{h_int}s.json"
+                    )
+
+            if h not in self.metrics_paths:
+                if self.metrics_path:
+                    self.metrics_paths[h] = self.metrics_path
+                else:
+                    self.metrics_paths[h] = Path(
+                        f"out/models/metrics_horizon_{h_int}s.json"
+                    )
+
+        if self.model_path is None and self.horizons:
+            self.model_path = self.model_paths.get(self.horizons[0])
+        if self.metrics_path is None and self.horizons:
+            self.metrics_path = self.metrics_paths.get(self.horizons[0])
+
 
 def parse_args(args: list[str] | None = None) -> OrchestratorConfig:
     """Parse CLI arguments into OrchestratorConfig."""
@@ -61,10 +103,17 @@ def parse_args(args: list[str] | None = None) -> OrchestratorConfig:
     )
 
     parser.add_argument(
+        "--horizons",
+        type=float,
+        nargs="+",
+        default=None,
+        help="Cascade evaluation horizons in seconds (e.g. --horizons 5 10 30)",
+    )
+    parser.add_argument(
         "--horizon",
         type=float,
-        default=5.0,
-        help="Evaluation horizon window in seconds (2, 5, 10, 30)",
+        default=None,
+        help="Single evaluation horizon window in seconds (e.g. 5.0)",
     )
     parser.add_argument(
         "--model-path",
@@ -150,20 +199,43 @@ def parse_args(args: list[str] | None = None) -> OrchestratorConfig:
     )
 
     parsed = parser.parse_args(args)
-    horizon_int = int(parsed.horizon) if parsed.horizon.is_integer() else parsed.horizon
 
-    model_path = parsed.model_path or Path(
-        f"out/models/xgboost_horizon_{horizon_int}s.json"
-    )
-    metrics_path = parsed.metrics_path or Path(
-        f"out/models/metrics_horizon_{horizon_int}s.json"
-    )
+    if parsed.horizons is not None:
+        horizons = [float(h) for h in parsed.horizons]
+    elif parsed.horizon is not None:
+        horizons = [float(parsed.horizon)]
+    else:
+        horizons = [5.0, 10.0, 30.0]
+
+    model_paths: dict[float, Path] = {}
+    metrics_paths: dict[float, Path] = {}
+
+    for h in horizons:
+        h_int = int(h) if h.is_integer() else h
+        if parsed.model_path and len(horizons) == 1:
+            model_paths[h] = parsed.model_path
+        else:
+            model_paths[h] = Path(f"out/models/xgboost_horizon_{h_int}s.json")
+
+        if parsed.metrics_path and len(horizons) == 1:
+            metrics_paths[h] = parsed.metrics_path
+        else:
+            metrics_paths[h] = Path(f"out/models/metrics_horizon_{h_int}s.json")
+
+    primary_h = horizons[0]
+    primary_h_int = int(primary_h) if primary_h.is_integer() else primary_h
+
+    model_path = parsed.model_path or model_paths.get(primary_h)
+    metrics_path = parsed.metrics_path or metrics_paths.get(primary_h)
     reference_features_path = parsed.reference_features or Path(
-        f"out/models/reference_features_horizon_{horizon_int}s.json"
+        f"out/models/reference_features_horizon_{primary_h_int}s.json"
     )
 
     return OrchestratorConfig(
-        horizon=parsed.horizon,
+        horizons=horizons,
+        horizon=primary_h,
+        model_paths=model_paths,
+        metrics_paths=metrics_paths,
         model_path=model_path,
         metrics_path=metrics_path,
         reference_features_path=reference_features_path,

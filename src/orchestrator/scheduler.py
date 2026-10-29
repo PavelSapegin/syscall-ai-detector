@@ -1,4 +1,4 @@
-"""Horizon timer and detection scheduler."""
+"""Horizon timer and cascade detection scheduler."""
 
 from __future__ import annotations
 
@@ -17,7 +17,7 @@ logger = logging.getLogger("orchestrator.scheduler")
 
 
 class HorizonScheduler:
-    """Queries processes reaching horizon window and executes detection."""
+    """Queries processes reaching cascade horizon windows and executes detection."""
 
     def __init__(
         self,
@@ -26,7 +26,8 @@ class HorizonScheduler:
         inference_engine: InferenceEngine,
         response_engine: ResponseEngine,
         audit_logger: AuditLogger,
-        horizon: float = 5.0,
+        horizon: float | None = None,
+        horizons: list[float] | None = None,
         interval_s: float = 0.5,
     ) -> None:
         self.registry = registry
@@ -34,7 +35,15 @@ class HorizonScheduler:
         self.inference_engine = inference_engine
         self.response_engine = response_engine
         self.audit_logger = audit_logger
-        self.horizon = horizon
+
+        if horizons is not None:
+            self.horizons = sorted(horizons)
+        elif horizon is not None:
+            self.horizons = [float(horizon)]
+        else:
+            self.horizons = [5.0, 10.0, 30.0]
+
+        self.horizon = self.horizons[0]
         self.interval_s = interval_s
 
         self._stop_requested = threading.Event()
@@ -58,128 +67,141 @@ class HorizonScheduler:
         return {k: raw_features[k] for k in interesting_keys if k in raw_features}
 
     def _tick(self) -> None:
-        """Run a single evaluation pass over candidate processes."""
+        """Run an evaluation pass over candidate processes across cascade horizons."""
         now = datetime.now()
-        candidates = self.registry.get_candidate_roots_for_horizon(self.horizon, now)
 
-        for proc in candidates:
+        for h in self.horizons:
             if self._stop_requested.is_set():
                 break
 
-            target_pid = proc.pid
-            start_time = proc.start_time
-            if start_time is None:
-                continue
+            candidates = self.registry.get_candidate_roots_for_horizon(h, now)
 
-            lifetime_s = (now - start_time).total_seconds()
+            for proc in candidates:
+                if self._stop_requested.is_set():
+                    break
 
-            # 1. Hunt target process and all its recursive descendants
-            all_pids, all_events = self.registry.hunt_process_tree(target_pid)
-            descendant_pids = [p for p in all_pids if p != target_pid]
+                if not proc.is_alive:
+                    continue
 
-            logger.info(
-                "Evaluating PID %d (%s) at horizon %.1fs (life=%.2fs, evs=%d, ch=%d)",
-                target_pid,
-                proc.image_file_name,
-                self.horizon,
-                lifetime_s,
-                len(all_events),
-                len(descendant_pids),
-            )
+                target_pid = proc.pid
+                start_time = proc.start_time
+                if start_time is None:
+                    continue
 
-            # 2. Extract features and construct DMatrix
-            try:
-                dmatrix, raw_features = self.features_adapter.build_feature_matrix(
-                    all_events, start_time, self.horizon
-                )
-            except Exception as e:
-                logger.error(
-                    "Feature extraction failed for PID %d: %s",
-                    target_pid,
-                    e,
-                    exc_info=True,
-                )
-                continue
+                lifetime_s = (now - start_time).total_seconds()
 
-            # 3. Model inference
-            try:
-                probability, is_malicious = self.inference_engine.predict(dmatrix)
-            except Exception as e:
-                logger.error(
-                    "Inference failed for PID %d: %s",
-                    target_pid,
-                    e,
-                    exc_info=True,
-                )
-                continue
+                # 1. Hunt target process and all its recursive descendants
+                all_pids, all_events = self.registry.hunt_process_tree(target_pid)
+                descendant_pids = [p for p in all_pids if p != target_pid]
 
-            top_signals = self._extract_top_signals(raw_features)
-
-            # 4. Response & Audit
-            if is_malicious:
-                logger.warning(
-                    "MALWARE ALERT! PID %d (%s) proba=%.4f >= thresh=%.4f",
+                logger.info(
+                    "Evaluating PID %d (%s) at cascade horizon %.1fs "
+                    "(life=%.2fs, evs=%d, ch=%d)",
                     target_pid,
                     proc.image_file_name,
-                    probability,
-                    self.inference_engine.threshold,
+                    h,
+                    lifetime_s,
+                    len(all_events),
+                    len(descendant_pids),
                 )
 
-                # Forcibly terminate root PID and all its descendants
-                term_info = self.response_engine.terminate_process_tree(
-                    target_pid, set(descendant_pids)
-                )
+                # 2. Extract features and construct DMatrix for window h
+                try:
+                    dmatrix, raw_features = self.features_adapter.build_feature_matrix(
+                        all_events, start_time, h
+                    )
+                except Exception as e:
+                    logger.error(
+                        "Feature extraction failed for PID %d at horizon %.1fs: %s",
+                        target_pid,
+                        h,
+                        e,
+                        exc_info=True,
+                    )
+                    continue
 
-                # Update registry status
-                self.registry.mark_killed(all_pids)
-                self.registry.mark_evaluated(
-                    target_pid, self.horizon, is_malicious=True
-                )
+                # 3. Model inference using the model for horizon h
+                try:
+                    probability, is_malicious = self.inference_engine.predict(
+                        dmatrix, horizon=h
+                    )
+                except Exception as e:
+                    logger.error(
+                        "Inference failed for PID %d at horizon %.1fs: %s",
+                        target_pid,
+                        h,
+                        e,
+                        exc_info=True,
+                    )
+                    continue
 
-                # Audit log
-                self.audit_logger.log_decision(
-                    target_pid=target_pid,
-                    image_name=proc.image_file_name,
-                    ppid=proc.ppid,
-                    descendant_pids=descendant_pids,
-                    horizon=self.horizon,
-                    lifetime_s=lifetime_s,
-                    probability=probability,
-                    threshold=self.inference_engine.threshold,
-                    verdict="MALICIOUS",
-                    action="BLOCKED_AND_KILLED",
-                    termination_info=term_info,
-                    top_signals=top_signals,
-                )
-            else:
-                # Legitimate process continues running
-                self.registry.mark_evaluated(
-                    target_pid, self.horizon, is_malicious=False
-                )
+                active_threshold = self.inference_engine.get_threshold(h)
+                top_signals = self._extract_top_signals(raw_features)
 
-                # Audit log
-                self.audit_logger.log_decision(
-                    target_pid=target_pid,
-                    image_name=proc.image_file_name,
-                    ppid=proc.ppid,
-                    descendant_pids=descendant_pids,
-                    horizon=self.horizon,
-                    lifetime_s=lifetime_s,
-                    probability=probability,
-                    threshold=self.inference_engine.threshold,
-                    verdict="BENIGN",
-                    action="ALLOWED",
-                    top_signals=top_signals,
-                )
+                # 4. Response & Audit
+                if is_malicious:
+                    logger.warning(
+                        "MALWARE ALERT! PID %d (%s) proba=%.4f >= thresh=%.4f "
+                        "(horizon=%.1fs)",
+                        target_pid,
+                        proc.image_file_name,
+                        probability,
+                        active_threshold,
+                        h,
+                    )
+
+                    # Forcibly terminate root PID and all its descendants
+                    term_info = self.response_engine.terminate_process_tree(
+                        target_pid, set(descendant_pids)
+                    )
+
+                    # Update registry status
+                    self.registry.mark_killed(all_pids)
+                    self.registry.mark_evaluated(target_pid, h, is_malicious=True)
+
+                    # Audit log
+                    self.audit_logger.log_decision(
+                        target_pid=target_pid,
+                        image_name=proc.image_file_name,
+                        ppid=proc.ppid,
+                        descendant_pids=descendant_pids,
+                        horizon=h,
+                        lifetime_s=lifetime_s,
+                        probability=probability,
+                        threshold=active_threshold,
+                        verdict="MALICIOUS",
+                        action="BLOCKED_AND_KILLED",
+                        termination_info=term_info,
+                        top_signals=top_signals,
+                    )
+                else:
+                    # Legitimate process continues running to next cascade stage
+                    self.registry.mark_evaluated(target_pid, h, is_malicious=False)
+
+                    # Audit log
+                    self.audit_logger.log_decision(
+                        target_pid=target_pid,
+                        image_name=proc.image_file_name,
+                        ppid=proc.ppid,
+                        descendant_pids=descendant_pids,
+                        horizon=h,
+                        lifetime_s=lifetime_s,
+                        probability=probability,
+                        threshold=active_threshold,
+                        verdict="BENIGN",
+                        action="ALLOWED",
+                        top_signals=top_signals,
+                    )
 
         # Cleanup old stopped processes
         self.registry.cleanup_old_processes()
 
     def _loop(self) -> None:
         """Main timer loop."""
+        horizons_str = ", ".join(f"{h:.1f}s" for h in self.horizons)
         logger.info(
-            "HorizonScheduler running (horizon=%.1fs, interval=%.2fs)...",
-            self.horizon,
+            "HorizonScheduler running (cascade horizons: [%s], interval=%.2fs)...",
+            horizons_str,
             self.interval_s,
         )
         while not self._stop_requested.is_set():
