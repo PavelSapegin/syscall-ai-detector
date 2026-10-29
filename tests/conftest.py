@@ -119,34 +119,37 @@ def ensure_default_model_artifacts(repo_root: Path) -> Generator[None, None, Non
     models_dir = repo_root / "out" / "models"
     models_dir.mkdir(parents=True, exist_ok=True)
 
-    ref_path = models_dir / "reference_features_horizon_5s.json"
-    metrics_path = models_dir / "metrics_horizon_5s.json"
-    model_path = models_dir / "xgboost_horizon_5s.json"
-
     created_files: list[Path] = []
+    thresholds = {5: 0.7327, 10: 0.8497, 30: 0.4859}
 
-    if not ref_path.exists():
-        ref_path.write_text(json.dumps(REFERENCE_90_FEATURES), encoding="utf-8")
-        created_files.append(ref_path)
+    import numpy as np
+    import xgboost as xgb
 
-    if not metrics_path.exists():
-        metrics_payload = {
-            "optimal_f1_threshold": 0.7327,
-            "optimal_threshold_f1": 0.7327,
-        }
-        metrics_path.write_text(json.dumps(metrics_payload), encoding="utf-8")
-        created_files.append(metrics_path)
+    dummy_x = np.zeros((2, len(REFERENCE_90_FEATURES)))
+    dummy_y = np.array([0, 1])
 
-    if not model_path.exists():
-        import numpy as np
-        import xgboost as xgb
+    for h, opt_thresh in thresholds.items():
+        ref_path = models_dir / f"reference_features_horizon_{h}s.json"
+        metrics_path = models_dir / f"metrics_horizon_{h}s.json"
+        model_path = models_dir / f"xgboost_horizon_{h}s.json"
 
-        dummy_x = np.zeros((2, len(REFERENCE_90_FEATURES)))
-        dummy_y = np.array([0, 1])
-        clf = xgb.XGBClassifier(n_estimators=1, max_depth=1)
-        clf.fit(dummy_x, dummy_y)
-        clf.save_model(model_path)
-        created_files.append(model_path)
+        if not ref_path.exists():
+            ref_path.write_text(json.dumps(REFERENCE_90_FEATURES), encoding="utf-8")
+            created_files.append(ref_path)
+
+        if not metrics_path.exists():
+            metrics_payload = {
+                "optimal_f1_threshold": opt_thresh,
+                "optimal_threshold_f1": opt_thresh,
+            }
+            metrics_path.write_text(json.dumps(metrics_payload), encoding="utf-8")
+            created_files.append(metrics_path)
+
+        if not model_path.exists():
+            clf = xgb.XGBClassifier(n_estimators=1, max_depth=1)
+            clf.fit(dummy_x, dummy_y)
+            clf.save_model(model_path)
+            created_files.append(model_path)
 
     yield
 

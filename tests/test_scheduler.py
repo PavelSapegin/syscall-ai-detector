@@ -22,6 +22,7 @@ def scheduler_setup(tmp_path: Path, dummy_features_json: Path) -> dict:
     adapter = FeaturesAdapter(dummy_features_json)
     inference = MagicMock(spec=InferenceEngine)
     inference.threshold = 0.5
+    inference.get_threshold.return_value = 0.5
     response = MagicMock(spec=ResponseEngine)
     response.terminate_process_tree.return_value = {
         "killed": [],
@@ -163,3 +164,77 @@ def test_extract_top_signals(scheduler_setup: dict) -> None:
     assert signals["n_ProcessStart"] == 2
     assert signals["n_fio_create"] == 3
     assert "unused_feature" not in signals
+
+
+def test_scheduler_cascade_progression(
+    tmp_path: Path, dummy_features_json: Path
+) -> None:
+    """Test process progression through cascade: passes 2s, killed on 5s."""
+    registry = ProcessRegistry()
+    adapter = FeaturesAdapter(dummy_features_json)
+    inference = MagicMock(spec=InferenceEngine)
+
+    def mock_predict(dmatrix, horizon=None):
+        if horizon == 2.0:
+            return 0.1, False
+        if horizon == 5.0:
+            return 0.95, True
+        return 0.99, True
+
+    inference.predict.side_effect = mock_predict
+    inference.get_threshold.return_value = 0.5
+
+    response = MagicMock(spec=ResponseEngine)
+    response.terminate_process_tree.return_value = {
+        "killed": [9001],
+        "already_dead": [],
+        "failed": [],
+    }
+
+    audit_path = tmp_path / "audit_cascade.jsonl"
+    audit = AuditLogger(audit_path)
+
+    scheduler = HorizonScheduler(
+        registry=registry,
+        features_adapter=adapter,
+        inference_engine=inference,
+        response_engine=response,
+        audit_logger=audit,
+        horizons=[2.0, 5.0, 10.0],
+        interval_s=0.05,
+    )
+
+    t0 = datetime.now() - timedelta(seconds=6.0)
+    registry.register_process_start(
+        pid=9001, ppid=1, image_file_name="suspicious.exe", timestamp=t0
+    )
+    registry.add_event(
+        9001,
+        {
+            "Timestamp": t0.strftime("%Y-%m-%d %H:%M:%S.%f"),
+            "EventType": "ProcessStart",
+            "ProcessID": 9001,
+        },
+    )
+
+    # In single tick with age=6.0s:
+    # 1. Horizon 2.0s is evaluated -> predict returns False -> 2.0 in evaluated_horizons
+    # 2. Horizon 5.0s is evaluated -> predict returns True -> Process 9001 is killed!
+    # 3. Horizon 10.0s: age (6.0s) has not reached 10.0s, plus process not alive
+    scheduler._tick()
+
+    proc = registry.get(9001)
+    assert proc is not None
+    assert 2.0 in proc.evaluated_horizons
+    assert 5.0 in proc.evaluated_horizons
+    assert 10.0 not in proc.evaluated_horizons
+    assert proc.status in (ProcessStatus.KILLED, ProcessStatus.MALICIOUS)
+
+    # Verify audit logs captured both evaluations (benign at 2s, malicious at 5s)
+    raw_lines = audit_path.read_text(encoding="utf-8").splitlines()
+    records = [json.loads(line) for line in raw_lines if line]
+    assert len(records) == 2
+    assert records[0]["horizon_s"] == 2.0
+    assert records[0]["verdict"] == "BENIGN"
+    assert records[1]["horizon_s"] == 5.0
+    assert records[1]["verdict"] == "MALICIOUS"

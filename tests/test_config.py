@@ -11,9 +11,13 @@ from src.orchestrator.config import OrchestratorConfig, parse_args
 def test_default_config() -> None:
     """Test default values of OrchestratorConfig dataclass."""
     cfg = OrchestratorConfig()
+    assert cfg.horizons == [5.0, 10.0, 30.0]
     assert cfg.horizon == 5.0
     assert cfg.model_path == Path("out/models/xgboost_horizon_5s.json")
     assert cfg.metrics_path == Path("out/models/metrics_horizon_5s.json")
+    assert 5.0 in cfg.model_paths
+    assert 10.0 in cfg.model_paths
+    assert 30.0 in cfg.model_paths
     assert cfg.reference_features_path == Path(
         "out/models/reference_features_horizon_5s.json"
     )
@@ -30,17 +34,25 @@ def test_default_config() -> None:
 
 
 def test_parse_args_defaults() -> None:
-    """Test parse_args with empty argument list returns default paths for horizon 5s."""
+    """Test parse_args with empty argument list returns default cascade paths."""
     cfg = parse_args([])
+    assert cfg.horizons == [5.0, 10.0, 30.0]
     assert cfg.horizon == 5.0
-    assert cfg.model_path == Path("out/models/xgboost_horizon_5s.json")
-    assert cfg.metrics_path == Path("out/models/metrics_horizon_5s.json")
-    assert cfg.reference_features_path == Path(
-        "out/models/reference_features_horizon_5s.json"
-    )
+    assert cfg.model_paths[5.0] == Path("out/models/xgboost_horizon_5s.json")
+    assert cfg.model_paths[10.0] == Path("out/models/xgboost_horizon_10s.json")
+    assert cfg.model_paths[30.0] == Path("out/models/xgboost_horizon_30s.json")
     assert cfg.threshold is None
     assert not cfg.bypass_admin_check
     assert not cfg.mock_mode
+
+
+def test_parse_args_cascade_horizons() -> None:
+    """Test parse_args with explicit cascade horizons."""
+    cfg = parse_args(["--horizons", "2", "5", "10"])
+    assert cfg.horizons == [2.0, 5.0, 10.0]
+    assert cfg.model_paths[2.0] == Path("out/models/xgboost_horizon_2s.json")
+    assert cfg.model_paths[5.0] == Path("out/models/xgboost_horizon_5s.json")
+    assert cfg.model_paths[10.0] == Path("out/models/xgboost_horizon_10s.json")
 
 
 @pytest.mark.parametrize("h", [2.0, 10.0, 30.0])

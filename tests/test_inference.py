@@ -88,8 +88,48 @@ def test_predict_decision_logic(
 
     dmatrix, _ = adapter.build_feature_matrix([], datetime.now(), 5.0)
     proba, is_malicious = engine.predict(dmatrix)
-
     assert isinstance(proba, float)
     assert 0.0 <= proba <= 1.0
     assert isinstance(is_malicious, bool)
     assert is_malicious == (proba >= 0.5)
+
+
+def test_cascade_multi_model_and_thresholds(repo_root: Path) -> None:
+    """Test loading multiple cascade models with distinct thresholds."""
+    models_dir = repo_root / "out" / "models"
+    model_paths = {
+        5.0: models_dir / "xgboost_horizon_5s.json",
+        10.0: models_dir / "xgboost_horizon_10s.json",
+        30.0: models_dir / "xgboost_horizon_30s.json",
+    }
+    metrics_paths = {
+        5.0: models_dir / "metrics_horizon_5s.json",
+        10.0: models_dir / "metrics_horizon_10s.json",
+        30.0: models_dir / "metrics_horizon_30s.json",
+    }
+
+    engine = InferenceEngine(model_path=model_paths, metrics_path=metrics_paths)
+    assert len(engine.models) == 3
+    assert 5.0 in engine.models
+    assert 10.0 in engine.models
+    assert 30.0 in engine.models
+
+    t5 = engine.get_threshold(5.0)
+    t10 = engine.get_threshold(10.0)
+    t30 = engine.get_threshold(30.0)
+
+    assert 0.1 <= t5 <= 0.99
+    assert 0.1 <= t10 <= 0.99
+    assert 0.1 <= t30 <= 0.99
+
+
+def test_cascade_custom_threshold_override_all(repo_root: Path) -> None:
+    """Test that custom_threshold overrides all horizons in cascade (Option A)."""
+    models_dir = repo_root / "out" / "models"
+    model_paths = {
+        5.0: models_dir / "xgboost_horizon_5s.json",
+        10.0: models_dir / "xgboost_horizon_10s.json",
+    }
+    engine = InferenceEngine(model_path=model_paths, custom_threshold=0.888)
+    assert engine.get_threshold(5.0) == 0.888
+    assert engine.get_threshold(10.0) == 0.888
