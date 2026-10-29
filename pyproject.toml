@@ -10,9 +10,7 @@ exclude = [
     "build",
     "out",
     "data",
-    "NtdllSyscallMonitor",
     "SyscallMonitor",
-    "W7SyscallMonitor",
 ]
 
 [tool.ruff.lint]
