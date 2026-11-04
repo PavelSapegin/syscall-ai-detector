@@ -463,6 +463,12 @@ def train_and_evaluate(
     final_model.save_model(model_file)
     logger.info("Model saved to %s", model_file)
 
+    # Save reference features for inference
+    ref_file = output_dir / f"reference_features_horizon_{horizon}s.json"
+    with open(ref_file, "w", encoding="utf-8") as f:
+        json.dump(feature_names, f, indent=2)
+    logger.info("Reference features saved to %s", ref_file)
+
     # Save metrics and threshold report
     results_file = output_dir / f"metrics_horizon_{horizon}s.json"
     results = {

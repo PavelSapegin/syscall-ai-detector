@@ -107,8 +107,17 @@ class HorizonScheduler:
 
                 # 2. Extract features and construct DMatrix for window h
                 try:
+                    target_features = None
+                    models_dict = getattr(self.inference_engine, "models", None)
+                    if isinstance(models_dict, dict) and h in models_dict:
+                        target_features = getattr(models_dict[h], "feature_names", None)
+                    else:
+                        main_model = getattr(self.inference_engine, "model", None)
+                        if main_model is not None:
+                            target_features = getattr(main_model, "feature_names", None)
+
                     dmatrix, raw_features = self.features_adapter.build_feature_matrix(
-                        all_events, start_time, h
+                        all_events, start_time, h, feature_names=target_features
                     )
                 except Exception as e:
                     logger.error(
@@ -117,6 +126,14 @@ class HorizonScheduler:
                         h,
                         e,
                         exc_info=True,
+                    )
+                    continue
+
+                if raw_features.get("n_events", 0) == 0:
+                    logger.debug(
+                        "Skipping evaluation for PID %d at horizon %.1fs (0 events in window)",
+                        target_pid,
+                        h,
                     )
                     continue
 

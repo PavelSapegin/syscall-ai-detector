@@ -75,6 +75,12 @@ class Orchestrator:
             custom_threshold=self.config.threshold,
         )
 
+        # Synchronize features adapter with loaded model schema
+        if self.inference_engine.model and self.inference_engine.model.feature_names:
+            self.features_adapter.reference_features = list(
+                self.inference_engine.model.feature_names
+            )
+
         # 3. Data structures & Engines
         self.registry = ProcessRegistry()
         self.response_engine = ResponseEngine()

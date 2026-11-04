@@ -49,6 +49,7 @@ class FeaturesAdapter:
         events: list[dict[str, Any]],
         t_start: datetime,
         horizon: float,
+        feature_names: list[str] | None = None,
     ) -> tuple[xgb.DMatrix, dict[str, Any]]:
         """Extract features from events and format as XGBoost DMatrix.
 
@@ -56,6 +57,8 @@ class FeaturesAdapter:
             events: List of raw ETW/syscall events for the process subtree.
             t_start: Datetime marking the start of observation window.
             horizon: Duration of window in seconds.
+            feature_names: Optional specific feature names list to align with.
+                           If None, uses self.reference_features.
 
         Returns:
             dmatrix: xgb.DMatrix with columns exactly matching reference features.
@@ -63,10 +66,11 @@ class FeaturesAdapter:
         """
         # Call the project's standard feature extraction
         raw_features = extract_features(events, t_start, horizon)
+        target_features = feature_names or self.reference_features
 
-        # Build feature vector aligned with reference features
+        # Build feature vector aligned with target features
         row: dict[str, float] = {}
-        for feat in self.reference_features:
+        for feat in target_features:
             val = raw_features.get(feat)
             if val is None:
                 # Missing feature defaults to 0.0
@@ -79,6 +83,6 @@ class FeaturesAdapter:
                     row[feat] = 0.0
 
         # Create DataFrame to preserve column names and order
-        df = pd.DataFrame([row], columns=self.reference_features)
-        dmatrix = xgb.DMatrix(df, feature_names=self.reference_features)
+        df = pd.DataFrame([row], columns=target_features)
+        dmatrix = xgb.DMatrix(df, feature_names=target_features)
         return dmatrix, raw_features
