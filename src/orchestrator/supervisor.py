@@ -37,12 +37,19 @@ class MonitorSupervisor:
         if self.command_str:
             return shlex.split(self.command_str)
 
-        # Check candidate paths for compiled C# binary
+        # Check candidate paths for compiled C# binary (net8.0 and net6.0 win-x64)
         candidates = [
+            Path(
+                "SyscallMonitor/bin/Release/net6.0/win-x64/publish/SyscallMonitor.exe"
+            ),
             Path("SyscallMonitor/bin/Release/net8.0/SyscallMonitor.exe"),
+            Path("SyscallMonitor/bin/Release/net6.0/SyscallMonitor.exe"),
             Path("SyscallMonitor/bin/Debug/net8.0/SyscallMonitor.exe"),
+            Path("SyscallMonitor/bin/Debug/net6.0/SyscallMonitor.exe"),
             Path("SyscallMonitor/bin/Release/net8.0/SyscallMonitor"),
+            Path("SyscallMonitor/bin/Release/net6.0/SyscallMonitor"),
             Path("SyscallMonitor/bin/Debug/net8.0/SyscallMonitor"),
+            Path("SyscallMonitor/bin/Debug/net6.0/SyscallMonitor"),
         ]
         for candidate in candidates:
             if candidate.exists():

@@ -37,6 +37,7 @@ class ProcessRecord:
     events: list[dict[str, Any]] = field(default_factory=list)
     evaluated_horizons: set[float] = field(default_factory=set)
     last_event_time: datetime | None = None
+    first_event_time: datetime | None = None
     has_process_start: bool = False
 
     @property
@@ -47,10 +48,17 @@ class ProcessRecord:
 class ProcessRegistry:
     """Thread-safe registry for active and recently terminated processes."""
 
-    def __init__(self, max_events_per_proc: int = 50_000) -> None:
+    def __init__(
+        self,
+        max_events_per_proc: int = 50_000,
+        max_unstarted_events: int = 50,
+        unstarted_ttl_s: float = 10.0,
+    ) -> None:
         self._lock = threading.RLock()
         self._processes: dict[int, ProcessRecord] = {}
         self._max_events_per_proc = max_events_per_proc
+        self._max_unstarted_events = max_unstarted_events
+        self._unstarted_ttl_s = unstarted_ttl_s
 
     def get(self, pid: int) -> ProcessRecord | None:
         with self._lock:
@@ -111,15 +119,31 @@ class ProcessRegistry:
 
             # Try parsing timestamp to maintain timeline
             ts_str = event.get("Timestamp")
+            ts: datetime | None = None
             if ts_str:
                 with contextlib.suppress(Exception):
                     ts = parse_ts(ts_str)
                     proc.last_event_time = ts
+                    if proc.first_event_time is None:
+                        proc.first_event_time = ts
                     if proc.has_process_start and proc.start_time is None:
                         proc.start_time = ts
 
-            if len(proc.events) < self._max_events_per_proc:
-                proc.events.append(event)
+            if proc.has_process_start:
+                if len(proc.events) < self._max_events_per_proc:
+                    proc.events.append(event)
+            else:
+                # Process has no ProcessStart yet (out-of-order ETW or background)
+                if (
+                    ts is not None
+                    and proc.first_event_time is not None
+                    and (ts - proc.first_event_time).total_seconds()
+                    > self._unstarted_ttl_s
+                ):
+                    # Out-of-order window expired: flush background event backlog
+                    proc.events.clear()
+                elif len(proc.events) < self._max_unstarted_events:
+                    proc.events.append(event)
 
     def hunt_process_tree(self, root_pid: int) -> tuple[set[int], list[dict[str, Any]]]:
         """Hunt a process and all its recursive descendants.
@@ -202,6 +226,10 @@ class ProcessRegistry:
                 elif proc.status == ProcessStatus.ACTIVE:
                     proc.status = ProcessStatus.EVALUATED_BENIGN
 
+                # Free raw events memory once benign passes maximum horizon
+                if not is_malicious and horizon >= 30.0:
+                    proc.events.clear()
+
     def mark_killed(self, pids: set[int]) -> None:
         """Mark processes as terminated/killed."""
         with self._lock:
@@ -211,16 +239,32 @@ class ProcessRegistry:
                     proc.status = ProcessStatus.KILLED
                     proc.stop_time = datetime.now()
 
-    def cleanup_old_processes(self, max_age_seconds: float = 300.0) -> int:
-        """Prune ancient terminated processes to bound memory usage."""
+    def cleanup_old_processes(
+        self,
+        max_age_seconds: float = 300.0,
+        background_idle_seconds: float = 60.0,
+    ) -> int:
+        """Prune ancient terminated and inactive background processes."""
         now = datetime.now()
         with self._lock:
             to_remove = []
             for pid, proc in self._processes.items():
+                # 1. Terminated processes exceeding retention TTL
                 if (
                     proc.status in (ProcessStatus.STOPPED, ProcessStatus.KILLED)
                     and proc.stop_time
                     and (now - proc.stop_time).total_seconds() > max_age_seconds
+                ):
+                    to_remove.append(pid)
+                    continue
+
+                # 2. Inactive background processes without ProcessStart or children
+                if (
+                    not proc.has_process_start
+                    and len(proc.children) == 0
+                    and proc.last_event_time
+                    and (now - proc.last_event_time).total_seconds()
+                    > background_idle_seconds
                 ):
                     to_remove.append(pid)
 
