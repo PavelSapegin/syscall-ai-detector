@@ -172,6 +172,18 @@ def test_candidate_roots_filter(registry: ProcessRegistry, now: datetime) -> Non
     )
     p4.status = ProcessStatus.KILLED
 
+    # Candidate 5: Background process with only syscall events and no ProcessStart
+    registry.add_event(
+        500,
+        {
+            "Timestamp": (t0 - timedelta(seconds=10.0)).strftime(
+                "%Y-%m-%d %H:%M:%S.%f"
+            ),
+            "EventType": "FileIOCreate",
+            "ProcessID": 500,
+        },
+    )
+
     candidates = registry.get_candidate_roots_for_horizon(5.0, t0)
     candidate_pids = {c.pid for c in candidates}
     assert candidate_pids == {100}

@@ -37,6 +37,7 @@ class ProcessRecord:
     events: list[dict[str, Any]] = field(default_factory=list)
     evaluated_horizons: set[float] = field(default_factory=set)
     last_event_time: datetime | None = None
+    has_process_start: bool = False
 
     @property
     def is_alive(self) -> bool:
@@ -72,6 +73,7 @@ class ProcessRegistry:
             proc.start_time = timestamp
             proc.last_event_time = timestamp
             proc.status = ProcessStatus.ACTIVE
+            proc.has_process_start = True
 
             # Link with parent process (handles out-of-order child arrival)
             if ppid > 0:
@@ -113,7 +115,7 @@ class ProcessRegistry:
                 with contextlib.suppress(Exception):
                     ts = parse_ts(ts_str)
                     proc.last_event_time = ts
-                    if proc.start_time is None:
+                    if proc.has_process_start and proc.start_time is None:
                         proc.start_time = ts
 
             if len(proc.events) < self._max_events_per_proc:
@@ -174,6 +176,8 @@ class ProcessRegistry:
         with self._lock:
             candidates: list[ProcessRecord] = []
             for proc in self._processes.values():
+                if not proc.has_process_start:
+                    continue
                 if proc.start_time is None:
                     continue
                 if proc.status in (ProcessStatus.MALICIOUS, ProcessStatus.KILLED):
