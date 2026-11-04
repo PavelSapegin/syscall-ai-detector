@@ -1,8 +1,8 @@
 using System;
 using System.Collections.Concurrent;
+using System.Diagnostics;
 using System.IO;
 using System.Net;
-using System.Diagnostics;
 using System.Text.Json;
 using System.Text.Json.Serialization;
 using System.Text.RegularExpressions;
@@ -12,7 +12,6 @@ using Microsoft.Diagnostics.Tracing.Session;
 
 namespace SyscallMonitor
 {
-
     public class TraceEventRecord
     {
         public string Timestamp { get; set; } = "";
@@ -33,20 +32,24 @@ namespace SyscallMonitor
         public int? NetworkSize { get; set; }
         public ulong? ConnectionId { get; set; }
     }
+
     class Program
     {
-        private const string SessionName = "SyscallMonitorSession";
         private const string OutputPath = "traces.jsonl";
+        private static readonly int _monitorProcessId = Environment.ProcessId;
+        private static readonly string _outputFileName = Path.GetFileName(OutputPath);
 
         private static readonly ConcurrentDictionary<ulong, string> _keyNameCache = new();
         private static readonly object _fileLock = new();
         private static StreamWriter? _writer;
 
-        // Filtering: track a process and its children
-        private static bool _filterEnabled = false;
-        private static int? _filterPid = null;
-        private static string? _filterProcessNameLower = null;
+        private static bool _filterEnabled;
+        private static int? _filterPid;
+        private static string? _filterProcessName;
         private static readonly ConcurrentDictionary<int, bool> _trackedPids = new();
+
+        private static string? _customSessionName;
+        private static bool _forceKernelLogger;
 
         private static readonly Regex _hkeyMachineRegex =
             new(@"^\\?REGISTRY\\MACHINE\\", RegexOptions.IgnoreCase | RegexOptions.Compiled);
@@ -59,7 +62,6 @@ namespace SyscallMonitor
 
         private static readonly Regex _hkeyWcSiloRegex =
             new(@"^\\?REGISTRY\\WC\\", RegexOptions.IgnoreCase | RegexOptions.Compiled);
-
 
         private static string NormalizeRegistryPath(string? rawPath)
         {
@@ -81,55 +83,47 @@ namespace SyscallMonitor
 
             return rawPath;
         }
+
         private static readonly JsonSerializerOptions _jsonOptions = new()
         {
             WriteIndented = false,
             DefaultIgnoreCondition = JsonIgnoreCondition.WhenWritingNull
         };
+
         static void Main(string[] args)
         {
+            Console.OutputEncoding = System.Text.Encoding.UTF8;
+
             if (!TraceEventSession.IsElevated() ?? false)
             {
                 Console.WriteLine("Нужны права администратора. Перезапустите программу от имени Администратора.");
                 return;
             }
 
-            // parse simple args: --pid=<num> or --process-name=<name>
-            foreach (var a in args)
+            ParseArguments(args);
+
+            string sessionName = ResolveSessionName(_customSessionName, _forceKernelLogger);
+            Console.WriteLine($"Инициализация сессии ETW: '{sessionName}' (ОС: {Environment.OSVersion}).");
+
+            try
             {
-                if (a.StartsWith("--pid=", StringComparison.OrdinalIgnoreCase) &&
-                    int.TryParse(a.Substring(6), out var pid))
+                var existingSession = TraceEventSession.GetActiveSession(sessionName);
+                if (existingSession != null)
                 {
-                    _filterEnabled = true;
-                    _filterPid = pid;
-                    _trackedPids.TryAdd(pid, true);
+                    Console.WriteLine($"Сессия '{sessionName}' уже активна. Выполняется сброс...");
+                    existingSession.Stop();
+                    existingSession.Dispose();
                 }
-                else if (a.StartsWith("--process-name=", StringComparison.OrdinalIgnoreCase))
-                {
-                    _filterEnabled = true;
-                    _filterProcessNameLower = a.Substring("--process-name=".Length).ToLowerInvariant();
-                    try
-                    {
-                        foreach (var p in Process.GetProcesses())
-                        {
-                            try
-                            {
-                                if (string.Equals(p.ProcessName, _filterProcessNameLower, StringComparison.OrdinalIgnoreCase) ||
-                                    string.Equals((p.ProcessName + ".exe"), _filterProcessNameLower, StringComparison.OrdinalIgnoreCase))
-                                {
-                                    _trackedPids.TryAdd(p.Id, true);
-                                }
-                            }
-                            catch { }
-                        }
-                    }
-                    catch { }
-                }
+            }
+            catch (Exception ex)
+            {
+                Console.WriteLine($"Предупреждение при проверке активной сессии: {ex.Message}");
             }
 
             _writer = new StreamWriter(OutputPath, append: true) { AutoFlush = true };
 
-            using var session = new TraceEventSession(SessionName);
+            using var session = new TraceEventSession(sessionName);
+            session.StopOnDispose = true;
 
             Console.CancelKeyPress += (s, e) =>
             {
@@ -149,23 +143,23 @@ namespace SyscallMonitor
             // Process
             session.Source.Kernel.ProcessStart += data =>
             {
-
                 if (_filterEnabled)
                 {
-                    if (data.ParentID != 0 && _trackedPids.ContainsKey(data.ParentID))
+                    if (_trackedPids.ContainsKey(data.ParentID))
                     {
                         _trackedPids.TryAdd(data.ProcessID, true);
                     }
 
-                    if (!string.IsNullOrEmpty(_filterProcessNameLower) &&
-                        !string.IsNullOrEmpty(data.ImageFileName) &&
-                        data.ImageFileName.ToLowerInvariant().Contains(_filterProcessNameLower))
+                    if (_filterPid == data.ProcessID)
                     {
                         _trackedPids.TryAdd(data.ProcessID, true);
                     }
 
-                    if (_filterPid.HasValue && data.ProcessID == _filterPid.Value)
+                    if (!string.IsNullOrEmpty(_filterProcessName) &&
+                        ProcessNameMatches(data.ImageFileName, _filterProcessName))
+                    {
                         _trackedPids.TryAdd(data.ProcessID, true);
+                    }
                 }
 
                 var record = new TraceEventRecord
@@ -176,7 +170,6 @@ namespace SyscallMonitor
                     ParentProcessID = data.ParentID,
                     ImageFileName = data.ImageFileName
                 };
-
 
                 if (!_filterEnabled || _trackedPids.ContainsKey(record.ProcessID))
                     WriteRecord(record);
@@ -193,7 +186,6 @@ namespace SyscallMonitor
                     ImageFileName = data.ImageFileName,
                     ExitCode = data.ExitStatus
                 };
-
 
                 if (!_filterEnabled || _trackedPids.ContainsKey(record.ProcessID))
                     WriteRecord(record);
@@ -306,7 +298,6 @@ namespace SyscallMonitor
             }
 
             Console.WriteLine("Работа программы корректно завершена.");
-
         }
 
         private static void WriteTcpRecord(
@@ -336,6 +327,8 @@ namespace SyscallMonitor
 
         private static void WriteRecord(TraceEventRecord record)
         {
+            if (IsSelfGeneratedRecord(record))
+                return;
 
             if (_filterEnabled && !_trackedPids.ContainsKey(record.ProcessID))
                 return;
@@ -349,13 +342,108 @@ namespace SyscallMonitor
                     {
                         _writer.WriteLine(json);
                     }
-                    catch (ObjectDisposedException)
-                    {
-
-                    }
+                    catch (ObjectDisposedException) { }
                 }
             }
         }
 
+        private static bool IsSelfGeneratedRecord(TraceEventRecord record)
+        {
+            if (record.ProcessID == _monitorProcessId)
+                return true;
+
+            if (!string.IsNullOrWhiteSpace(record.FileName))
+            {
+                string fileName = Path.GetFileName(record.FileName);
+                if (string.Equals(fileName, _outputFileName, StringComparison.OrdinalIgnoreCase))
+                    return true;
+            }
+
+            return false;
+        }
+
+        private static string ResolveSessionName(string? customSessionName, bool forceKernelLogger)
+        {
+            if (forceKernelLogger)
+                return KernelTraceEventParser.KernelSessionName;
+
+            if (!string.IsNullOrWhiteSpace(customSessionName))
+                return customSessionName;
+
+            bool isWindows7OrOlder = Environment.OSVersion.Version < new Version(6, 2);
+            return isWindows7OrOlder ? KernelTraceEventParser.KernelSessionName : "SyscallMonitorSession";
+        }
+
+        private static void ParseArguments(string[] args)
+        {
+            foreach (var argument in args)
+            {
+                if (argument.StartsWith("--pid=", StringComparison.OrdinalIgnoreCase) &&
+                    int.TryParse(argument.Substring("--pid=".Length), out var pid) &&
+                    pid > 0)
+                {
+                    _filterEnabled = true;
+                    _filterPid = pid;
+                    _trackedPids.TryAdd(pid, true);
+                }
+                else if (argument.StartsWith("--process-name=", StringComparison.OrdinalIgnoreCase))
+                {
+                    var processName = argument.Substring("--process-name=".Length).Trim();
+                    if (processName.Length == 0)
+                        continue;
+
+                    _filterEnabled = true;
+                    _filterProcessName = processName;
+
+                    foreach (var process in Process.GetProcesses())
+                    {
+                        try
+                        {
+                            if (ProcessNameMatches(process.ProcessName, processName))
+                                _trackedPids.TryAdd(process.Id, true);
+                        }
+                        catch (InvalidOperationException)
+                        {
+                        }
+                        finally
+                        {
+                            process.Dispose();
+                        }
+                    }
+                }
+                else if (argument.StartsWith("--session-name=", StringComparison.OrdinalIgnoreCase))
+                {
+                    var name = argument.Substring("--session-name=".Length).Trim();
+                    if (name.Length > 0)
+                        _customSessionName = name;
+                }
+                else if (string.Equals(argument, "--kernel-logger", StringComparison.OrdinalIgnoreCase) ||
+                         string.Equals(argument, "--nt-kernel-logger", StringComparison.OrdinalIgnoreCase))
+                {
+                    _forceKernelLogger = true;
+                }
+            }
+
+            if (_filterEnabled)
+            {
+                Console.WriteLine(
+                    $"Фильтр процессов включён. Отслеживаемых PID: {_trackedPids.Count}.");
+            }
+        }
+
+        private static bool ProcessNameMatches(string? imageFileName, string processName)
+        {
+            if (string.IsNullOrWhiteSpace(imageFileName))
+                return false;
+
+            var imageName = Path.GetFileName(imageFileName);
+            var requestedName = Path.GetFileName(processName);
+
+            return string.Equals(imageName, requestedName, StringComparison.OrdinalIgnoreCase) ||
+                   string.Equals(
+                       Path.GetFileNameWithoutExtension(imageName),
+                       Path.GetFileNameWithoutExtension(requestedName),
+                       StringComparison.OrdinalIgnoreCase);
+        }
     }
 }
