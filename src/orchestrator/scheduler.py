@@ -131,7 +131,7 @@ class HorizonScheduler:
 
                 if raw_features.get("n_events", 0) == 0:
                     logger.debug(
-                        "Skipping evaluation for PID %d at horizon %.1fs (0 events in window)",
+                        "Skipping eval for PID %d at horizon %.1fs (0 events)",
                         target_pid,
                         h,
                     )
