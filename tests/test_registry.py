@@ -264,4 +264,110 @@ def test_concurrent_access(registry: ProcessRegistry, now: datetime) -> None:
     for t in threads:
         t.join()
 
-    assert not errors, f"Thread errors: {errors}"
+    assert not errors
+
+
+def test_unstarted_event_buffer_limits(
+    registry: ProcessRegistry, now: datetime
+) -> None:
+    """Test buffer cap for events arriving before ProcessStart and TTL cleanup."""
+    t0 = now
+    # 1. Add 60 events without ProcessStart -> must cap at max_unstarted_events (50)
+    for i in range(60):
+        registry.add_event(
+            5000,
+            {
+                "Timestamp": (t0 + timedelta(milliseconds=i * 10)).strftime(
+                    "%Y-%m-%d %H:%M:%S.%f"
+                ),
+                "EventType": "FileIOCreate",
+                "ProcessID": 5000,
+            },
+        )
+    proc = registry.get(5000)
+    assert proc is not None
+    assert len(proc.events) == 50
+
+    # 2. Add event past unstarted_ttl_s (10s) without ProcessStart -> buffer flushed
+    registry.add_event(
+        5000,
+        {
+            "Timestamp": (t0 + timedelta(seconds=11)).strftime("%Y-%m-%d %H:%M:%S.%f"),
+            "EventType": "FileIOCreate",
+            "ProcessID": 5000,
+        },
+    )
+    assert len(proc.events) == 0
+
+    # 3. If ProcessStart arrives, event limit is expanded
+    registry.register_process_start(5000, 1, "app.exe", t0 + timedelta(seconds=12))
+    assert proc.has_process_start is True
+    for i in range(100):
+        registry.add_event(
+            5000,
+            {
+                "Timestamp": (t0 + timedelta(seconds=12, milliseconds=i * 10)).strftime(
+                    "%Y-%m-%d %H:%M:%S.%f"
+                ),
+                "EventType": "FileIOCreate",
+                "ProcessID": 5000,
+            },
+        )
+    assert len(proc.events) == 100
+
+
+def test_cleanup_background_processes(registry: ProcessRegistry, now: datetime) -> None:
+    """Test purging stale background processes without start and children."""
+    t0 = now - timedelta(seconds=100)
+    # Background process without ProcessStart and without children
+    registry.add_event(
+        6001,
+        {
+            "Timestamp": t0.strftime("%Y-%m-%d %H:%M:%S.%f"),
+            "EventType": "FileIOCreate",
+            "ProcessID": 6001,
+        },
+    )
+    # Background process with a child
+    registry.add_event(
+        6002,
+        {
+            "Timestamp": t0.strftime("%Y-%m-%d %H:%M:%S.%f"),
+            "EventType": "FileIOCreate",
+            "ProcessID": 6002,
+        },
+    )
+    registry.register_process_start(7001, 6002, "child.exe", now)
+
+    # Cleanup with background_idle_seconds=60s
+    removed = registry.cleanup_old_processes(
+        max_age_seconds=300.0, background_idle_seconds=60.0
+    )
+    assert removed == 1
+    assert registry.get(6001) is None
+    assert registry.get(6002) is not None  # Preserved as parent of 7001
+
+
+def test_mark_evaluated_clears_events_at_max_horizon(
+    registry: ProcessRegistry, now: datetime
+) -> None:
+    """Test freeing raw events buffer once benign process completes 30s horizon."""
+    proc = registry.register_process_start(8001, 1, "benign.exe", now)
+    registry.add_event(
+        8001,
+        {
+            "Timestamp": now.strftime("%Y-%m-%d %H:%M:%S.%f"),
+            "EventType": "FileIOCreate",
+            "ProcessID": 8001,
+        },
+    )
+    assert len(proc.events) == 1
+
+    # Horizon 5s: events retained
+    registry.mark_evaluated(8001, 5.0, is_malicious=False)
+    assert len(proc.events) == 1
+
+    # Horizon 30s: events cleared to reclaim RAM
+    registry.mark_evaluated(8001, 30.0, is_malicious=False)
+    assert len(proc.events) == 0
+    assert proc.status == ProcessStatus.EVALUATED_BENIGN
